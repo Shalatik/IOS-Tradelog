@@ -1,0 +1,345 @@
+#!/bin/sh
+
+############################################################################################
+# VUT FIT
+# IOS 1. projekt
+# Simona Ceskova (xcesko00)
+# 4.4.2021
+############################################################################################
+
+
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+
+#DEKLARACE POUZITYCH GLOBALNICH PROMENNYCH
+COMMAND_NUMBER=0
+COMMAND=""  
+LOG_FILES=""
+GZ_FILES=""
+TICKERI=""
+A_DATE=""
+B_DATE=""
+WIDTH=""
+LONG_GLOBAL=""
+
+############################################################################################
+#HELP FUNKCE
+hint()
+{
+    echo "Usage: tradelog [-h | --help]"
+    echo "       tradelog [FILTR] [PRIKAZ] [LOG [LOG2 [...]]"
+    echo "Prikazy:"
+    echo "            list-tick     vypis seznamu vyskytujicich se burzovnich symbolu (tickeru)"
+    echo "            profit        vypis celkoveho zisku z uzavrených pozic"
+    echo "            pos           vypis hodnot aktualne drzených pozic serazených sestupne dle hodnoty."
+    echo "            last-price    vypis posledni znanem ceny pro kazdy ticker"
+    echo "            hist-ord      vypis histogramu poctu transakci dle tickeru"
+    echo "            graph-pos     vypis grafu hodnot drzenych pozic dle tickeru"
+    echo "Prepinace:"
+    echo "            -a DATETIME   filtr vsech zaznamu po uvedenem datu (YYYY-MM-DD HH:MM:SS)"
+    echo "            -b DATETIME   filtr vsech zaznamu pred uvedenym datem (YYYY-MM-DD HH:MM:SS)"
+    echo "            -t TICKER     filtr vsech zaznamu pouze uvedenych tickeru "
+    echo "            -w WIDTH      nastavuje sirku grafu podle nejdelsiho radku"
+    echo "Program na analyzu zaznamu systemu pro obchodovani na burze. Filtruje zaznamy a poskytuje statistiky podle zadani uzivatele."
+}
+
+# TESTOVANI CASU 
+date_test()
+{   
+    date="$1"
+    time="$2"
+    echo "$date" | awk -F "-" '{ if (($1 < 0) || ($2 > 12) || ($2 < 0) || ($3 < 0) || ($3 > 32)) {print "Spatny format casu" > "/dev/stderr"; exit 1} }'
+    echo "$time" | awk -F ":" '{ if (($1 < 0) || ($1 > 24) || ($2 > 60) || ($2 < 0) || ($3 < 0) || ($3 > 60)) {print "Spatny format casu" > "/dev/stderr"; exit 1} }'
+}
+############################################################################################
+#FUNKCE PRO PRIKAZY
+
+list_tick()
+{
+    # vezme parametr (ty data)| vypise jen ty jmena | seradi 
+    echo "$LOG_DATA" | awk -F ";" '{print $2}' | sort -u   
+    exit 0
+}
+
+profit()
+{
+    #za kazdeho zaznamu se vynasobi cena*objem zvlast pro sell a pro buy
+    SELL=$(echo "${LOG_DATA}" | awk -F ";" '{ if ($3 == "sell") printf "%.2f\n", ($4*$6)}')
+    BUY=$(echo "${LOG_DATA}" | awk -F ";" '{ if ($3 == "buy") printf "%.2f\n", ($4*$6)}')
+    #vynasobene castky se sectou zvlast pro sell a pro buy
+    SUM_BUY=$(echo "$BUY" | awk '{ sum += $1} END {printf "%.2f\n", sum}')
+    SUM_SELL=$(echo "$SELL" | awk '{ sum += $1} END {printf "%.2f\n", sum}')
+    #od konecne castky sell se odecte konecna castka buy
+    PROFIT=$(echo "$SUM_BUY" "$SUM_SELL" | awk '{printf "%.2f\n", ($2 - $1)}')
+    echo "$PROFIT"
+    exit 0
+}
+
+pos()
+{   
+    POS_POLE=""
+    LAST=0
+    #srovnam si tickery do podoby jake potrebuji
+    TICKER=$(echo "$LOG_DATA" | awk -F ";" '{print $2}' | sort -u | awk -F "\n" '{ORS=" "}{print $1}')
+    for i in $TICKER; do
+        #pro SELL a BUY si sectu vsechny hodnoty pro dany ticker
+        POS_SELL=$(echo "$LOG_DATA" | awk -F ";" -v i="$i" -v pos_sell="$POS_SELL" '{ if (($3 == "sell") && ($2 == i)) {print pos_sell+=$6} }') 
+        POS_BUY=$(echo "$LOG_DATA" | awk -F ";" -v i="$i" -v pos_buy="$POS_BUY" '{ if (($3 == "buy") && ($2 == i)){print pos_buy+=$6 } }')
+        #Najdu si vsechny ceny pro kazdy ticker
+        LAST=$(echo "$LOG_DATA" | awk -F ";" -v i="$i" -v last="$LAST" '{if ($2 == i){print last=$4}}' )
+        #ulozim si pooze posledni radek kde je posledni cena a posledni hodnota pro sell nebo pro buy
+        S=$(echo "$POS_SELL" | tail -1)
+        B=$(echo "$POS_BUY" | tail -1)
+        L=$(echo "$LAST" | tail -1)
+        #vypis tickeru s jeho cenou
+        POS=$(echo "$B" "$S" "$L"| awk -v i="$i" -v pos_buy="$B" -v pos_sell="$S" -v last="$L" '{printf "%-10s:%.2f", i, (pos_buy-pos_sell)*last }')
+        #kazdy ticker s jeho cenou si ulozim do pole
+        if [ "$POS_POLE" = "" ]; then
+            POS_POLE="$POS"
+        else
+            POS_POLE="$POS_POLE \n$POS"
+        fi
+        #vynuluji si promenne
+        POS_SELL=0
+        POS_BUY=0
+        LAST=0
+    done
+    #hledam nejdelsi cislo v druhem sloupci s cenami
+    POS_PRICE=$(echo "$POS_POLE" | awk '{print $2}')
+    LONG=$(echo "$POS_PRICE" | awk -F ":" '{for (i=1; i<=NF; i++) if (length($i)>max) max=length($i)} END{print max}' )
+    LONG_GLOBAL="$LONG"
+    #tisknu pole uz se vsemi tickerama a cenama
+    POS_POLE=$( echo "$POS_POLE" "$LONG" | sort -t ":" -k 2,2rn | awk -F ":" -v long="$LONG" ' {printf "%-10s: %*.2f\n", $1, long, $2 } ' )
+    echo "$POS_POLE"
+}
+
+last_price()
+{
+    #pocty a k nim prislusne tickery kolikrat se vyskytl urcity ticker v zaznamech
+    LAST=$(echo "${LOG_DATA}" | awk -F ";" '{print $2}' | sort | uniq -c )
+    #pouze pocty kolikrat se mezi zaznamy vyskytl urcity ticker LAST_Number
+    LAST_N=$(echo "${LAST}" | awk -F " " '{print $1}')
+    #zaznamy serazene podle tickeru abecedne
+    DATA=$(echo "${LOG_DATA}" | sort -t ';' -k 2,2 )
+    #TemP promenna ktera mi scita radky abych se dostala na spravny posledni pro kazdy ticker
+    TP=0
+    LAST_POLE=""
+    LAST_PRICE=""
+    #pro kazde cislo, ktere si projdu ve for loop budu tisknout poze posledni ticker a cenu
+    for i in $LAST_N; do
+        #k minulymu poslednimu tickeru prictu cislo poctu vyskytu dalsiho tickeru, abych se dostala na radek jeho posledniho zaznamu
+        TP=$(echo "$i" "$TP" | awk '{print ($1+$2)}')
+        #pomoci sed si do promenne vlozim ten radek ktery chci vytisknout - ticker a jeho posledni cenu
+        LAST=$(echo "$DATA" | sed -n "${TP}p" | awk -F ";" '{printf "%-10s:%.2f", $2, $4}')
+        LAST_PRICE=$(echo "$DATA" | sed -n "${TP}p" | awk -F ";" '{print $4}')
+        
+        if [ "$LAST_POLE" = "" ]; then
+            LAST_POLE="$LAST"
+        else
+            LAST_POLE="$LAST_POLE \n$LAST"
+        fi
+        #echo "$LAST"
+    done
+    #hledam nejdelsi cislo
+    LONG=$(echo "$LAST_PRICE" | awk -F ":" '{for (i=1; i<=NF; i++) if (length($i)>max) max=length($i)} END{print max}' )
+    #tisknu uz pole s tickerem a jejich posledni cenou
+    LAST_POLE=$( echo "$LAST_POLE" "$LONG" | awk -F ":" -v long="$LONG" ' {printf "%-10s: %*.2f\n", $1, long+1, $2 } ' )
+    echo "$LAST_POLE"
+    exit 0
+}
+
+hist_ord()
+{
+    #seznam tickeru spolu s cislem poctu jejich vyskytu jejich transakci
+    HISTORY=$(echo "${LOG_DATA}" | awk -F ";" '{print $2}' | sort | uniq -c )
+    #pokud nepouzivam WIDTH
+    if [ "$WIDTH" = "" ];then 
+        #vytisknu # tolikrat tolikrat je hodnota vyskytu tickeru v zaznamech
+        HIS=$(echo "$HISTORY" | awk -F " " 'BEGIN{ORS=" "} {printf "%-10s: ", $2}  { n=1; while (n <= $1) { printf "#"; n++ }} {printf "\n"}')
+        echo "$HIS"
+    #s pouzitou WIDTH
+    else
+        #najdu si nejvetsi hodnotu podle toho ze radek s ni dam jako prvni
+        BIG=$(echo "$HISTORY" | sort | sed -n "1p" | awk -F " " '{print $1}')
+        #vztvorim konstantu kterou budu upravovat sirku
+        CONST=$(echo "$BIG" "$WIDTH" | awk '{print ($2/$1)}')
+        #pocet vyskytu tickeru v zaznamech vynasobim konstantou a podle toho vypisu pocet #
+        HIS=$(echo "$HISTORY" "$CONST" | awk -F " " -v const="$CONST" 'BEGIN{ORS=" "} {printf "%-10s: ", $2}  { n=1; while (n <= ($1*const)) { printf "#"; n++ }} {printf "\n"}')
+        echo "$HIS"
+    fi
+    exit 0
+}
+
+graph_pos()
+{
+    #zavolam funkci pos, vztahnu zni data
+    POS=$(pos | sort | awk -F ":" '{print $1 $2}')
+    #abych nasla nejvetsi hodnotu musim vyuzit absolutni hodnotu
+    POS_ABS=$(pos | awk -F ":" '{printf "%.10f\n", sqrt($2*$2)}')
+    BIG=$(echo "$POS_ABS" | awk 'BEGIN {max = 0}{if ($1>max) max = $1} END {print max} ')
+    #v pripade bez WIDTH tiknu ! nebo # po vzdeleni 1000
+    if [ "$WIDTH" = "" ]; then
+        GRAPH=$(echo "$POS" | awk -F " " 'BEGIN{ORS=" "} {printf "%-10s: ", $1 }
+        { n=1; if($2 < 0){graf="!"}
+        else {graf="#"}
+        while (n <= (sqrt($2*$2)/1000)){ print graf; n++ } } {printf "\n"}')
+    #pro WIDTH pouziju konstantu
+    else
+        CONTS=$(echo "$BIG" "$WIDTH" | awk '{print $2/$1}')
+        GRAPH=$(echo "$POS" "$CONTS" | awk -F " " -v const="$CONTS" 'BEGIN{ORS=" "} {printf "%-10s: ", $1} { n=1; if($2 < 0) graf="!"; else graf="#"; while (n <= sqrt($2*$2)*const) { printf graf; n++ }} {printf "\n"}')       
+        echo "$GRAPH"
+    fi
+    exit 0
+}
+
+############################################################################################
+#FUNKCE PRO FILTRY
+
+t_ticker()
+{   
+    #vytvori regex
+    regex=".*;${TICKERI%??};.*"
+    #pripraví grep command 
+    grep="grep ${regex}"
+    #vyfiltruje logy a ulozi je do log_dat
+    LOG_DATA=$(echo "${LOG_DATA}" | awk -F ";" '{print $0;}'| $grep)
+}
+
+#AFTER - porovnam data
+a_datetime()
+{
+    LOG_DATA=$(echo "${LOG_DATA}" | awk -F ";" '{print $0;}'| awk -F ';' -v date_find="$A_DATE" '{ if ( date_find < $1 ) print $0 }')
+}
+#BEFORE - porovnam data
+b_datetime()
+{
+    LOG_DATA=$(echo "${LOG_DATA}" | awk -F ";" '{print $0;}'| awk -F ';' -v date_find="$B_DATE" '{ if ( date_find > $1 ) print $0 }')
+}
+
+############################################################################################
+#prochazim vsechny zadane parametry a spravne je zaradim
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+    -h | --help)
+        hint
+        exit 0
+        ;;
+    list-tick | profit | pos | last-price | hist-ord | graph-pos)
+        #kontrola jestli byl zadan jen jeden prikaz - pocitam si pocet uz zadanych prikazu
+        COMMAND="$1 $COMMAND"
+        COMMAND_NUMBER=$(expr "$COMMAND_NUMBER" + 1)
+        if [ "$COMMAND_NUMBER" = "2" ]; then
+            echo "Spatny pocet zadanych prikazu"
+            exit 1
+        else
+            shift
+        fi
+        ;;
+    -a | -b | -t | -w)
+        #kontrola jestli je druhy argument za filtrem prazdny
+        if [ -z "$2" ]; then
+            echo "Za filtrem neni argument"
+            exit 1
+        else
+            if [ "$1" = "-a" ]; then
+                #kontrola spravneho data pomoci funkce date_test
+                date_test $2
+                A_DATE="$2 $A_DATE"
+            elif  [ "$1" = "-b" ]; then
+                #kontrola spravneho data pomoci funkce date_test
+                date_test $2
+                B_DATE="$2 $B_DATE"
+            #kazdy ticker na vyfiltrovani se ulozi do stringu tickeru 
+            elif [ "$1" = "-t" ]; then
+                TICKERI="$2\|$TICKERI"
+            elif [ "$1" = "-w" ]; then
+                #kontrola jestli se jedna o cele kladne cislo a jestli je -w zadane pouze jedenkrat
+                if [ -n "$2" ] && [ "$2" -eq "$2" ] 2>/dev/null; then
+                    if [ "$2" -gt 0 ] && [ "$WIDTH" = "" ]; then
+                        WIDTH="$2"
+                    else
+                        echo "Filtr -w je zadan spatne"
+                        exit 1
+                    fi
+                else
+                    echo "Parametr -w neni cele kladne cislo"
+                    exit 1
+                fi
+            fi
+            shift
+            shift
+        fi
+        ;;
+    *)
+        #Najdu si poslednich 7 pismen ze zadaneho parametru
+        StrLen=$(echo "${1}" | wc -c)
+        From=$(expr "$StrLen" - 7)
+        LOG=$(echo "$1" | cut -c"${From}"-"${StrLen}")
+        # je to soubor .log.gz ? - poslednich 7 pismen == .log.gz
+        if [ "$LOG" = ".log.gz" ]; then
+            GZ_FILES="$1 $GZ_FILES"
+        else
+            #Najdu si zase posledni 4 pismena z parametru
+            StrLen=$(echo "${1}" | wc -c)
+            From=$(expr "$StrLen" - 4)
+            LOG=$(echo "$1" | cut -c"${From}"-"${StrLen}")
+            # je to soubor .log ? posledni 4 pismena == .log
+            if [ "$LOG" = ".log" ]; then
+                LOG_FILES="$1 $LOG_FILES"
+            fi
+        fi
+        shift
+        ;;
+    esac
+done
+
+#ZPRACOVANI ZAZNAMU PODLE INPUTU
+#podle ruznych moznosti co se stane zvolim spravnou kam pridelit soubor podle jeho typu
+if [ "$LOG_FILES" = "" ] && [ "$GZ_FILES" = "" ]; then      #pokud neni zadny .log ani .log.gz soubor, cte se ze vstupu
+    LOG_DATA_COMMAND="cat"
+elif [ "$LOG_FILES" = "" ] && [ "$GZ_FILES" != "" ]; then   #pouze .log.gz soubory
+    LOG_DATA_COMMAND="gzip -d -c $GZ_FILES"
+elif [ "$LOG_FILES" != "" ] && [ "$GZ_FILES" != "" ]; then   
+    LOG_DATA_COMMAND="gzip -d -c $GZ_FILES | cat $LOG_FILES -"
+else
+    LOG_DATA_COMMAND="cat $LOG_FILES"                       #pouze .log soubory
+fi
+
+# Ziska logy
+LOG_DATA=$($LOG_DATA_COMMAND)
+
+#FILTRY se zpracuji a zavola jejich funkce
+if [ "$TICKERI" != "" ]; then
+    t_ticker 
+fi
+   
+if [ "$A_DATE" != "" ]; then
+    a_datetime  
+fi
+
+if [ "$B_DATE" != "" ]; then
+    b_datetime 
+fi
+
+#VOLANI PRIKAZU z promenne COMMAND, kde jsou ulozenz nazev prikazu
+#kazdy prikaz muze byt jen jednou, proto po skonceni se muze program ukoncit
+for i in $COMMAND ; do
+    if [ "$i" = "list-tick" ]; then
+        list_tick 
+    elif [ "$i" = "profit" ]; then
+        profit 
+    elif [ "$i" = "pos" ]; then
+        pos
+        exit 0
+    elif [ "$i" = "last-price" ]; then
+        last_price 
+    elif [ "$i" = "hist-ord" ]; then
+        hist_ord 
+    elif [ "$i" = "graph-pos" ]; then
+        graph_pos
+    fi
+done
+
+# pokud uzivatel nezada zadny vyraz tak se soubory jen vypisou na vystup
+echo "$LOG_DATA"
+exit 0
